@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
-import r
+import re
 
 # Constants
 max_results_per_row = 5  # Number of comparable hotels to display per property
