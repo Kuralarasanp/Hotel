@@ -2,6 +2,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import io
+import re
+
+# Constants
+max_results_per_row = 5  # Number of comparable hotels to display per property
 
 # Hotel class mapping
 hotel_class_map = {
@@ -38,19 +42,32 @@ def get_nearest_three(df, target_mv, target_vpr):
     df['distance'] = np.sqrt((df['Market Value-2024'] - target_mv) ** 2 + (df['2024 VPR'] - target_vpr) ** 2)
     return df.sort_values('distance').head(3).drop(columns='distance')
 
-# Streamlit UI
+# Function to clean property address: lowercase, remove all non-alphanumeric
+def clean_address(addr):
+    if pd.isna(addr):
+        return ""
+    return re.sub(r'[^a-z0-9]', '', str(addr).lower())
+
 st.title("🏨 Hotel Comparable Matcher Tool")
 
 uploaded_file = st.file_uploader("📤 Upload Excel File", type=['xlsx'])
 
 if uploaded_file:
     try:
-        df = pd.read_excel(uploaded_file, engine='openpyxl')  # Explicit engine here
+        df = pd.read_excel(uploaded_file, engine='openpyxl')
     except Exception as e:
         st.error(f"❌ Failed to read Excel file: {e}")
         st.stop()
 
+    # Strip whitespace from column names
     df.columns = [col.strip() for col in df.columns]
+
+    # Check required columns exist
+    required_cols = ['Property Address', 'State', 'Property County', 'No. of Rooms', 'Market Value-2024', '2024 VPR', 'Hotel Class', 'Owner Street Address', 'Owner Name/ LLC Name']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        st.error(f"❌ Missing required columns: {', '.join(missing_cols)}")
+        st.stop()
 
     # Clean and preprocess
     cols_to_numeric = ['No. of Rooms', 'Market Value-2024', '2024 VPR']
@@ -63,16 +80,17 @@ if uploaded_file:
     df['Hotel Class Order'] = df['Hotel Class Order'].astype(int)
     df['Property Address'] = df['Property Address'].astype(str).str.strip()
 
-    # Property selection
-    Property_Address = df['Property Address'].dropna().astype(str).str.strip().tolist()
+    # Property selection list
+    property_addresses = df['Property Address'].dropna().unique().tolist()
 
     selected_hotels = st.multiselect(
         "🏨 Select Property Address",
-        options=["[SELECT ALL]"] + Property_Address,
+        options=["[SELECT ALL]"] + property_addresses,
         default=["[SELECT ALL]"]
     )
 
-    if "[SELECT ALL]" in selected_hotels:
+    # Handle selection
+    if not selected_hotels or "[SELECT ALL]" in selected_hotels:
         selected_rows = df.copy()
     else:
         selected_rows = df[df['Property Address'].isin(selected_hotels)]
@@ -91,7 +109,7 @@ if uploaded_file:
     with col4:
         vpr_max = st.number_input("🔼 VPR Max Filter %", vpr_min, 500.0, 120.0, 1.0)
 
-        match_columns = [
+    match_columns = [
         'Property Address', 'State', 'Property County',
         'No. of Rooms', 'Market Value-2024', '2024 VPR',
         'Hotel Class', 'Hotel Class Order'
@@ -100,9 +118,11 @@ if uploaded_file:
 
     if st.button("🚀 Run Matching"):
         results_rows = []
+        progress_bar = st.progress(0)
+        total = len(selected_rows)
 
         with st.spinner("🔍 Matching hotels, please wait..."):
-            for _, base_row in selected_rows.iterrows():
+            for i, (_, base_row) in enumerate(selected_rows.iterrows()):
                 try:
                     base_market_val = base_row['Market Value-2024']
                     base_vpr = base_row['2024 VPR']
@@ -120,9 +140,12 @@ if uploaded_file:
                         (subset['Hotel Class Order'].isin(allowed_orders))
                     )
 
-                    matching_rows = subset[mask].drop_duplicates(
-                        subset=['Project / Hotel Name', 'Owner Street Address', 'Owner Name/ LLC Name'], keep='first'
-                    )
+                    matching_rows = subset[mask].copy()
+                    # Clean addresses before dropping duplicates
+                    matching_rows['Cleaned Property Address'] = matching_rows['Property Address'].apply(clean_address)
+                    matching_rows = matching_rows.drop_duplicates(
+                        subset=['Cleaned Property Address', 'Owner Street Address', 'Owner Name/ LLC Name'], keep='first'
+                    ).drop(columns=['Cleaned Property Address'])
 
                     base_data = base_row[match_columns].to_dict()
 
@@ -162,21 +185,19 @@ if uploaded_file:
                 except Exception as e:
                     st.error(f"❌ Error processing hotel '{base_row['Property Address']}': {e}")
 
+                progress_bar.progress((i + 1) / total)
+
         if results_rows:
             result_df = pd.DataFrame(results_rows)
             st.success("✅ Matching Completed")
 
-            # Selection UI to pick which results to download
-            selected_indices = st.multiselect(
-                "🔘 Select rows to download",
-                options=result_df.index.tolist(),
-                format_func=lambda x: f"Row {x}: {result_df.at[x, 'Property Address']}"
-            )
+            # Filter to only matched rows for display and download
+            matched_df = result_df[result_df['Matching Results Count / Status'] != 'No_Match_Case']
 
-            st.dataframe(result_df)
+            st.dataframe(matched_df)
 
             total_processed = len(result_df)
-            match_count = (result_df['Matching Results Count / Status'] != 'No_Match_Case').sum()
+            match_count = len(matched_df)
             no_match_count = total_processed - match_count
 
             st.write("### 📊 Summary")
@@ -184,17 +205,14 @@ if uploaded_file:
             st.write(f"- ❌ No Matches: {no_match_count}")
             st.write(f"- 🔢 Total Processed: {total_processed}")
 
-            if selected_indices:
-                filtered_df = result_df.loc[selected_indices]
+            if match_count > 0:
                 output = io.BytesIO()
-                filtered_df.to_excel(output, index=False)
+                matched_df.to_excel(output, index=False)
                 st.download_button(
-                    label="📥 Download Selected Matches as Excel",
+                    label="📥 Download All Matched Results as Excel",
                     data=output.getvalue(),
-                    file_name="hotel_selected_matches.xlsx",
+                    file_name="hotel_matched_results.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-            elif match_count > 0:
-                st.info("ℹ️ Matches found — select rows above to enable download.")
             else:
                 st.warning("⚠️ No matches found — nothing to download.")
