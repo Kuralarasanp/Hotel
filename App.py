@@ -91,9 +91,7 @@ if uploaded_file:
     with col4:
         vpr_max = st.number_input("🔼 VPR Max Filter %", vpr_min, 500.0, 120.0, 1.0)
 
-    max_results_per_row = st.slider("🔢 Max Matches Per Hotel", 1, 10, 5)
-
-    match_columns = [
+        match_columns = [
         'Property Address', 'State', 'Property County',
         'No. of Rooms', 'Market Value-2024', '2024 VPR',
         'Hotel Class', 'Hotel Class Order'
